@@ -42,6 +42,7 @@ pct_colour() {
 make_bar() {
   pct="$1"; warn="$2"; danger="$3"
   filled=$(printf '%.0f' "$(echo "$pct * 10 / 100" | bc -l 2>/dev/null || echo 0)")
+  [ "$filled" -gt 10 ] && filled=10
   empty=$((10 - filled))
   colour=$(pct_colour "$pct" "$warn" "$danger")
   bar=""
