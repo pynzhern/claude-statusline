@@ -56,7 +56,9 @@ if [ -n "$used" ]; then
   bar=$(make_bar   "$used" 50 80)
   ctx_str="${col}ctx $(printf '%.0f' "$used")%${RESET} [${bar}]"
 else
-  ctx_str="ctx --"
+  # no messages yet (e.g. after /clear) — show empty bar at 0%
+  empty_bar=$(make_bar 0 50 80)
+  ctx_str="${GREEN}ctx 0%${RESET} [${empty_bar}]"
 fi
 
 # --- claude plan usage (cached via python helper, 5-min TTL) ---
@@ -91,7 +93,7 @@ fi
 
 # prepaid credit balance
 if [ -n "$bal" ]; then
-  extra_str="${WHITE}${cur} ${bal}${RESET}"
+  extra_str="${WHITE}bal ${cur} ${bal}${RESET}"
 else
   extra_str=""
 fi

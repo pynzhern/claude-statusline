@@ -4,7 +4,7 @@ claude usage data fetcher for the statusline.
 caches results for 5 minutes so the API is not hammered on every refresh.
 outputs JSON with usage percentages and prepaid balance.
 """
-import json, os, sqlite3, subprocess, hashlib, re, time
+import json, math, os, sqlite3, subprocess, hashlib, re, time
 from datetime import datetime, timezone
 
 CACHE_FILE = '/tmp/claude_usage_cache.json'
@@ -80,18 +80,24 @@ def fetch(url, session_key, cf_clearance):
     return resp.json()
 
 def time_until(iso_str):
-    """Human-readable countdown to an ISO 8601 timestamp."""
+    """Human-readable countdown to an ISO 8601 timestamp (hours/mins rounded up)."""
     try:
         dt   = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
         now  = datetime.now(timezone.utc)
-        secs = max(0, int((dt - now).total_seconds()))
-        d, rem = divmod(secs, 86400)
-        h = rem // 3600
-        m = (rem % 3600) // 60
-        if d > 0:
+        secs = max(0, (dt - now).total_seconds())
+        if secs >= 86400:
+            d = int(secs // 86400)
+            h = math.ceil((secs % 86400) / 3600)
+            if h == 24:
+                d += 1; h = 0
             return f'{d}d{h}h' if h else f'{d}d'
-        if h > 0:
+        if secs >= 3600:
+            h = int(secs // 3600)
+            m = math.ceil((secs % 3600) / 60)
+            if m == 60:
+                h += 1; m = 0
             return f'{h}h{m:02d}m' if m else f'{h}h'
+        m = math.ceil(secs / 60)
         return f'{m}m'
     except Exception:
         return '?'
