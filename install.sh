@@ -29,22 +29,23 @@ command -v jq      >/dev/null 2>&1 || fail "jq not found — brew install jq / a
 command -v bc      >/dev/null 2>&1 || fail "bc not found — install it via your package manager"
 ok "dependencies: python3, jq, bc"
 
-# ── pycryptodome ───────────────────────────────────────────────────────────────
-if python3 -c "from Crypto.Cipher import AES" 2>/dev/null; then
-  ok "pycryptodome already installed"
-else
-  warn "installing pycryptodome..."
-  pip3 install pycryptodome --quiet || fail "pip3 install pycryptodome failed"
-  ok "pycryptodome installed"
-fi
+# ── python dependencies ────────────────────────────────────────────────────────
+# ensure_pip <package> <import-probe>
+#   package      — name passed to `pip3 install`
+#   import-probe — python expression that raises if the package is missing
+ensure_pip() {
+  package="$1"; probe="$2"
+  if python3 -c "$probe" 2>/dev/null; then
+    ok "$package already installed"
+  else
+    warn "installing $package..."
+    pip3 install "$package" --quiet || fail "pip3 install $package failed"
+    ok "$package installed"
+  fi
+}
 
-if python3 -c "from curl_cffi import requests" 2>/dev/null; then
-  ok "curl_cffi already installed"
-else
-  warn "installing curl_cffi..."
-  pip3 install curl_cffi --quiet || fail "pip3 install curl_cffi failed"
-  ok "curl_cffi installed"
-fi
+ensure_pip pycryptodome "from Crypto.Cipher import AES"
+ensure_pip curl_cffi    "from curl_cffi import requests"
 
 # ── platform check ─────────────────────────────────────────────────────────────
 platform=$(uname -s)

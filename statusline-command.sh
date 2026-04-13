@@ -38,11 +38,12 @@ pct_colour() {
   fi
 }
 
-# build a 10-char progress bar coloured by percentage thresholds
+# build a 10-char progress bar coloured by percentage thresholds.
+# filled segments are rounded and clamped to [0, 10] so >100% utilisation
+# still renders a full bar rather than overflowing.
 make_bar() {
   pct="$1"; warn="$2"; danger="$3"
-  filled=$(printf '%.0f' "$(echo "$pct * 10 / 100" | bc -l 2>/dev/null || echo 0)")
-  [ "$filled" -gt 10 ] && filled=10
+  filled=$(awk -v p="$pct" 'BEGIN { f = int(p/10 + 0.5); if (f<0) f=0; if (f>10) f=10; print f }')
   empty=$((10 - filled))
   colour=$(pct_colour "$pct" "$warn" "$danger")
   bar=""
@@ -52,15 +53,12 @@ make_bar() {
 }
 
 # --- context window (label + % in bar colour, bar itself coloured) ---
-if [ -n "$used" ]; then
-  col=$(pct_colour "$used" 50 80)
-  bar=$(make_bar   "$used" 50 80)
-  ctx_str="${col}ctx $(printf '%.0f' "$used")%${RESET} [${bar}]"
-else
-  # no messages yet (e.g. after /clear) — show empty bar at 0%
-  empty_bar=$(make_bar 0 50 80)
-  ctx_str="${GREEN}ctx 0%${RESET} [${empty_bar}]"
-fi
+# when no messages exist yet (e.g. after /clear) fall back to 0% so the empty
+# bar renders through the same code path as the populated case.
+[ -z "$used" ] && used=0
+col=$(pct_colour "$used" 50 80)
+bar=$(make_bar   "$used" 50 80)
+ctx_str="${col}ctx $(printf '%.0f' "$used")%${RESET} [${bar}]"
 
 # --- claude plan usage (cached via python helper, 5-min TTL) ---
 usage_json=$(python3 ~/.claude/statusline-usage.py 2>/dev/null || echo '{}')
