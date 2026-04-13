@@ -4,8 +4,10 @@ claude usage data fetcher for the statusline.
 caches results for 5 minutes so the API is not hammered on every refresh.
 outputs JSON with usage percentages and prepaid balance.
 """
-import json, math, os, sqlite3, subprocess, hashlib, re, time
-from datetime import datetime, timezone
+# only cheap stdlib imports at module load — heavier deps (Crypto, curl_cffi,
+# sqlite3, subprocess, datetime) are imported lazily inside the cache-miss
+# branch so the hot path stays fast.
+import json, os, sys, time
 
 CACHE_FILE = '/tmp/claude_usage_cache.json'
 CACHE_TTL  = 300  # 5 minutes
@@ -27,12 +29,12 @@ def save_cache(data):
         json.dump(data, f)
 
 def get_aes_key():
+    import subprocess, hashlib
     result = subprocess.run(
         ['security', 'find-generic-password', '-s', 'Claude Safe Storage', '-a', 'Claude Key', '-w'],
         capture_output=True, text=True, timeout=5
     )
     safe_key = result.stdout.strip().encode()
-    from Crypto.Cipher import AES as _AES  # noqa: F401 — ensure import works
     return hashlib.pbkdf2_hmac('sha1', safe_key, b'saltysalt', 1003, dklen=16)
 
 def decrypt_cookie(enc_val, key):
@@ -43,6 +45,7 @@ def decrypt_cookie(enc_val, key):
     return dec[:-dec[-1]].decode('latin1')
 
 def get_auth(key):
+    import sqlite3, re
     db_path = os.path.expanduser('~/Library/Application Support/Claude/Cookies')
     db = sqlite3.connect(db_path)
     rows = db.execute("""
@@ -81,6 +84,7 @@ def fetch(url, session_key, cf_clearance):
 
 def time_until(iso_str):
     """Human-readable countdown to an ISO 8601 timestamp (rounded up to the nearest minute)."""
+    from datetime import datetime, timezone
     try:
         dt   = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
         now  = datetime.now(timezone.utc)
@@ -88,8 +92,8 @@ def time_until(iso_str):
     except Exception:
         return '?'
 
-    # round up to whole minutes once, then let divmod handle the carry cleanly
-    total_mins = math.ceil(secs / 60)
+    # round up to whole minutes via integer arithmetic, then divmod the carry
+    total_mins = -(-int(secs) // 60)
     days,  rem_mins = divmod(total_mins, 24 * 60)
     hours, mins     = divmod(rem_mins, 60)
 
@@ -100,10 +104,18 @@ def time_until(iso_str):
     return f'{mins}m'
 
 def main():
-    cached = load_cache()
-    if cached:
-        print(json.dumps(cached))
-        return
+    # fast path: read the cache once, check _cached_at (which the Stop hook
+    # zeroes after each Claude response to force a refresh), and stream the
+    # raw bytes if still fresh — avoids a re-parse/re-serialise roundtrip.
+    try:
+        with open(CACHE_FILE) as f:
+            raw = f.read()
+        data = json.loads(raw)
+        if time.time() - data.get('_cached_at', 0) < CACHE_TTL:
+            sys.stdout.write(raw)
+            return
+    except Exception:
+        pass
 
     try:
         key  = get_aes_key()

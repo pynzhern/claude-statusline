@@ -4,7 +4,7 @@
 #   cwd · git branch · model · context bar · 5h/7d plan usage · prepaid balance
 #
 # supported: macOS, Linux
-# requires:  python3, pip, jq, bc
+# requires:  python3, pip, jq
 
 set -e
 
@@ -26,8 +26,7 @@ echo ""
 # ── dependency checks ──────────────────────────────────────────────────────────
 command -v python3 >/dev/null 2>&1 || fail "python3 not found — install it first"
 command -v jq      >/dev/null 2>&1 || fail "jq not found — brew install jq / apt install jq"
-command -v bc      >/dev/null 2>&1 || fail "bc not found — install it via your package manager"
-ok "dependencies: python3, jq, bc"
+ok "dependencies: python3, jq"
 
 # ── python dependencies ────────────────────────────────────────────────────────
 # ensure_pip <package> <import-probe>
@@ -84,12 +83,13 @@ s['statusLine'] = {
     'refreshInterval': 60
 }
 
-# add Stop hook to clear cache after each response
+# add Stop hook: zero _cached_at so the next render fetches fresh data,
+# but keep the stale values so they can be served as a fallback if the
+# API call fails (better than showing nothing).
 hooks = s.get('hooks', {})
 stop  = hooks.get('Stop', [])
 
-# avoid duplicating the hook
-cache_cmd = 'rm -f /tmp/claude_usage_cache.json'
+cache_cmd = """python3 -c "import json,os; f='/tmp/claude_usage_cache.json'; d=json.load(open(f)) if os.path.exists(f) else {}; d['_cached_at']=0; json.dump(d,open(f,'w'))" 2>/dev/null || true"""
 already   = any(
     any(h.get('command') == cache_cmd for h in entry.get('hooks', []))
     for entry in stop
