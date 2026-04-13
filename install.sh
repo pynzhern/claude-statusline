@@ -38,6 +38,14 @@ else
   ok "pycryptodome installed"
 fi
 
+if python3 -c "from curl_cffi import requests" 2>/dev/null; then
+  ok "curl_cffi already installed"
+else
+  warn "installing curl_cffi..."
+  pip3 install curl_cffi --quiet || fail "pip3 install curl_cffi failed"
+  ok "curl_cffi installed"
+fi
+
 # ── platform check ─────────────────────────────────────────────────────────────
 platform=$(uname -s)
 case "$platform" in

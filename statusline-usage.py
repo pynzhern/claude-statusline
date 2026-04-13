@@ -67,14 +67,17 @@ def get_auth(key):
     return session_key, cf_clearance, org_id
 
 def fetch(url, session_key, cf_clearance):
-    import urllib.request
-    headers = {
-        'Cookie': f'sessionKey={session_key}; cf_clearance={cf_clearance}',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Accept': 'application/json',
-    }
-    req = urllib.request.Request(url, headers=headers)
-    return json.loads(urllib.request.urlopen(req, timeout=5).read())
+    # curl_cffi impersonates Chrome's TLS fingerprint, bypassing Cloudflare's JA3 check
+    from curl_cffi import requests as cffi_requests
+    resp = cffi_requests.get(
+        url,
+        cookies={'sessionKey': session_key, 'cf_clearance': cf_clearance},
+        headers={'Accept': 'application/json'},
+        impersonate='chrome',
+        timeout=5,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 def time_until(iso_str):
     """Human-readable countdown to an ISO 8601 timestamp."""
