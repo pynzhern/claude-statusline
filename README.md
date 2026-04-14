@@ -3,7 +3,7 @@
 A rich statusline for [Claude Code](https://claude.ai/code) that shows your working context, model, context window usage, and live Claude.ai plan limits — all colour-coded.
 
 ```
-portfolio  ·  main*  ·  claude-sonnet-4-6  ·  ctx 51% [▓▓▓▓▓░░░░░]  ·  5h 62% [▓▓▓▓▓▓░░░░] ↻3h13m  ·  7d 19% [▓▓░░░░░░░░] ↻4d21h  ·  SGD 15.59
+portfolio  ·  main*  ·  claude-sonnet-4-6  ·  ctx 51% [▓▓▓▓▓░░░░░]  ·  5h 62% [▓▓▓▓▓▓░░░░] ↻3h13m  ·  7d 19% [▓▓░░░░░░░░] ↻4d21h  ·  bal SGD 15.59
 ```
 
 | Section | What it shows |
@@ -14,7 +14,7 @@ portfolio  ·  main*  ·  claude-sonnet-4-6  ·  ctx 51% [▓▓▓▓▓░░�
 | `ctx 51% [▓▓▓▓▓░░░░░]` | Context window used |
 | `5h 62% [▓▓▓▓▓▓░░░░] ↻3h13m` | 5-hour session plan limit + reset countdown |
 | `7d 19% [▓▓░░░░░░░░] ↻4d21h` | 7-day weekly plan limit + reset countdown |
-| `SGD 15.59` | Prepaid credit balance |
+| `bal SGD 15.59` | Prepaid credit balance |
 
 **Colours:** green → amber (≥50%) → red (≥80%). Usage data refreshes after every Claude response and every 60 seconds in the background.
 
@@ -47,23 +47,20 @@ Claude Code runs `statusline-command.sh` and passes a JSON blob on stdin with th
 
 ### Fetching plan usage
 
-`statusline-usage.py` authenticates with claude.ai by decrypting your session cookie from the Claude desktop app's Electron SQLite cookie database:
-
-- **macOS** — reads the AES encryption key from macOS Keychain (`Claude Safe Storage`), derives a 16-byte key via PBKDF2-SHA1 (1003 iterations), decrypts the `v10`-prefixed cookie
-- **Linux** — tries `libsecret` first, falls back to Electron's hardcoded `"peanuts"` password (1 iteration)
+`statusline-usage.py` authenticates with claude.ai by decrypting your session cookie from the Claude desktop app's Electron SQLite cookie database. On macOS it reads the AES encryption key from Keychain (`Claude Safe Storage`), derives a 16-byte key via PBKDF2-SHA1 (1003 iterations), and decrypts the `v10`-prefixed cookie value.
 
 It then calls two internal claude.ai API endpoints:
 - `/api/organizations/{org_id}/usage` — session/weekly utilisation and reset times
 - `/api/organizations/{org_id}/prepaid/credits` — prepaid credit balance
 
-Results are cached to `/tmp/claude_usage_cache.json` for 5 minutes. A `Stop` hook in Claude Code clears the cache after every response so you always see fresh numbers.
+Results are cached to `/tmp/claude_usage_cache.json` for 5 minutes. A `Stop` hook in Claude Code zeroes `_cached_at` after every response, forcing a re-fetch on the next render while preserving stale values as a fallback if the API call fails.
 
 ## Platform support
 
 | Platform | Status |
 |---|---|
 | macOS | ✅ Supported |
-| Linux | ✅ Supported (requires Claude desktop app or manual session cookie) |
+| Linux | ❌ Not yet (cookie path and keychain differ from macOS) |
 | Windows | ❌ Not yet (DPAPI cookie decryption differs) |
 
 ## Customisation

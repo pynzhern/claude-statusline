@@ -5,9 +5,11 @@ caches results for 5 minutes so the API is not hammered on every refresh.
 outputs JSON with usage percentages and prepaid balance.
 """
 # only cheap stdlib imports at module load — heavier deps (Crypto, curl_cffi,
-# sqlite3, subprocess, datetime) are imported lazily inside the cache-miss
-# branch so the hot path stays fast.
-import json, os, sys, time
+# sqlite3, subprocess) are imported lazily inside the cache-miss branch so the
+# hot path stays fast. datetime is always needed (emit → time_until) so it
+# lives at module level.
+import json, os, time
+from datetime import datetime, timezone
 
 CACHE_FILE = '/tmp/claude_usage_cache.json'
 CACHE_TTL  = 300  # 5 minutes
@@ -84,7 +86,6 @@ def fetch(url, session_key, cf_clearance):
 
 def time_until(iso_str):
     """Human-readable countdown to an ISO 8601 timestamp (rounded up to the nearest minute)."""
-    from datetime import datetime, timezone
     try:
         if not iso_str:
             return '—'
@@ -105,16 +106,26 @@ def time_until(iso_str):
         return f'{hours}h{mins:02d}m' if mins else f'{hours}h'
     return f'{mins}m'
 
+def emit(data):
+    """Output data with resets_in computed fresh from stored resets_at timestamps.
+    resets_at is the raw ISO string from the API; we compute time_until() on every
+    call so the countdown is always accurate regardless of how old the cache is."""
+    out = {k: v for k, v in data.items() if not k.startswith('_')}
+    if 'five_hour_resets_at' in out:
+        out['five_hour_resets_in'] = time_until(out.pop('five_hour_resets_at'))
+    if 'seven_day_resets_at' in out:
+        out['seven_day_resets_in'] = time_until(out.pop('seven_day_resets_at'))
+    print(json.dumps(out))
+
 def main():
-    # fast path: read the cache once, check _cached_at (which the Stop hook
-    # zeroes after each Claude response to force a refresh), and stream the
-    # raw bytes if still fresh — avoids a re-parse/re-serialise roundtrip.
+    # fast path: parse the cache, check _cached_at (zeroed by the Stop hook after
+    # each Claude response), and emit with freshly computed countdowns so the
+    # reset timers stay accurate across the 5-minute cache window.
     try:
         with open(CACHE_FILE) as f:
-            raw = f.read()
-        data = json.loads(raw)
+            data = json.load(f)
         if time.time() - data.get('_cached_at', 0) < CACHE_TTL:
-            sys.stdout.write(raw)
+            emit(data)
             return
     except Exception:
         pass
@@ -123,7 +134,7 @@ def main():
         key  = get_aes_key()
         session_key, cf_clearance, org_id = get_auth(key)
         if not session_key or not org_id:
-            print(json.dumps(load_cache(stale_ok=True) or {}))
+            emit(load_cache(stale_ok=True) or {})
             return
 
         base = f'https://claude.ai/api/organizations/{org_id}'
@@ -135,12 +146,12 @@ def main():
         fh = usage.get('five_hour')
         if fh:
             result['five_hour_pct']       = int(fh.get('utilization', 0))
-            result['five_hour_resets_in'] = time_until(fh.get('resets_at', ''))
+            result['five_hour_resets_at'] = fh.get('resets_at', '')
 
         sd = usage.get('seven_day')
         if sd:
             result['seven_day_pct']       = int(sd.get('utilization', 0))
-            result['seven_day_resets_in'] = time_until(sd.get('resets_at', ''))
+            result['seven_day_resets_at'] = sd.get('resets_at', '')
 
         if prepaid and 'amount' in prepaid:
             amount   = prepaid['amount']          # in minor units (cents)
@@ -149,11 +160,11 @@ def main():
             result['prepaid_currency'] = currency
 
         save_cache(result)
-        print(json.dumps(result))
+        emit(result)
 
     except Exception:
         # fall back to stale cache rather than showing nothing
-        print(json.dumps(load_cache(stale_ok=True) or {}))
+        emit(load_cache(stale_ok=True) or {})
 
 if __name__ == '__main__':
     main()
