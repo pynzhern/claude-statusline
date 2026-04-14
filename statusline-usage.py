@@ -86,6 +86,8 @@ def time_until(iso_str):
     """Human-readable countdown to an ISO 8601 timestamp (rounded up to the nearest minute)."""
     from datetime import datetime, timezone
     try:
+        if not iso_str:
+            return '—'
         dt   = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
         now  = datetime.now(timezone.utc)
         secs = max(0, (dt - now).total_seconds())
