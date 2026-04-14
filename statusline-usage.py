@@ -121,10 +121,18 @@ def main():
     # fast path: parse the cache, check _cached_at (zeroed by the Stop hook after
     # each Claude response), and emit with freshly computed countdowns so the
     # reset timers stay accurate across the 5-minute cache window.
+    # also bypass the cache if any usage window has already reset — the stored
+    # percentages are guaranteed stale once resets_at has passed.
     try:
         with open(CACHE_FILE) as f:
             data = json.load(f)
-        if time.time() - data.get('_cached_at', 0) < CACHE_TTL:
+        now = datetime.now(timezone.utc)
+        window_reset = any(
+            datetime.fromisoformat(data[k].replace('Z', '+00:00')) <= now
+            for k in ('five_hour_resets_at', 'seven_day_resets_at')
+            if data.get(k)
+        )
+        if time.time() - data.get('_cached_at', 0) < CACHE_TTL and not window_reset:
             emit(data)
             return
     except Exception:
