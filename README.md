@@ -22,6 +22,10 @@ portfolio  ·  main*  ·  claude-sonnet-4-6  ·  ctx 51% [▓▓▓▓▓░░�
 
 The statusline shows the current `/effort` level (`low`, `medium`, `high`, `xhigh`, `max`, `auto`). Most levels are persisted to `~/.claude/settings.json` by Claude Code, but **`max` is session-only** and never written to disk — so a small `UserPromptSubmit` hook (`effort-hook.sh`) watches for `/effort max` and writes a session-scoped marker at `/tmp/claude-effort-<session_id>`. The statusline prefers the marker over `settings.json`, and the hook clears the marker when you switch to any persisted level. Stale markers (>24h) are pruned automatically.
 
+### Knowledge-graph freshness (optional)
+
+If you keep a local knowledge graph that refreshes itself (e.g. an [Obsidian](https://obsidian.md) vault rebuilt by a background pipeline), the statusline can show how long ago it last synced — `⇄ ObsKG 12m ago`, or a red `ObsKG build failed` if the most recent build errored. The segment is **self-guarding**: it only renders if `~/.claude-automation/.auto-refresh.state.json` exists, so it stays invisible for everyone else. The `⇄` glyph is deliberately distinct from the `↻` used for plan resets, so the two never blur together.
+
 ## Requirements
 
 - [Claude Code](https://claude.ai/code) CLI

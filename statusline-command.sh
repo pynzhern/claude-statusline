@@ -163,6 +163,33 @@ else
   extra_str=""; extra_p=""
 fi
 
+# ── obsidian knowledge-graph freshness ───────────────────────────────────────
+# ambient confidence that the Obsidian KG auto-refresh is running. reads only the
+# tiny state file + one log scan (cheap). green = healthy, shows time since last
+# successful refresh; red = the most recent vault build failed. the ⇄ glyph reads
+# as a sync indicator ("ObsKG, last synced N ago"); deliberately NOT the ↻ the
+# usage bars use for resets, so the two meanings stay visually distinct.
+kg_str=""; kg_p=""
+_kgstate="$HOME/.claude-automation/.auto-refresh.state.json"
+_kglog="$HOME/.claude-automation/auto-refresh.log"
+if [ -f "$_kgstate" ]; then
+  _kglast=$(jq -r '.last_refresh_at // 0' "$_kgstate" 2>/dev/null)
+  _kgage=$(( $(date +%s) - ${_kglast%.*} ))
+  if   [ "$_kgage" -lt 90 ];    then _kgago="just now"
+  elif [ "$_kgage" -lt 3600 ];  then _kgago="$(( _kgage / 60 ))m ago"
+  elif [ "$_kgage" -lt 86400 ]; then _kgago="$(( _kgage / 3600 ))h ago"
+  else                               _kgago="$(( _kgage / 86400 ))d ago"
+  fi
+  # most recent build event in the log: refresh (ok) or a failure
+  _kgevent=$(grep -E "refresh cc:|BUILD (FAILED|TIMED OUT)" "$_kglog" 2>/dev/null | tail -1)
+  case "$_kgevent" in
+    *"BUILD FAILED"*|*"TIMED OUT"*)
+      kg_str="${RED}ObsKG build failed${RESET}"; kg_p="ObsKG build failed" ;;
+    *)
+      kg_str="${GREEN}⇄ ObsKG ${_kgago}${RESET}"; kg_p="⇄ ObsKG ${_kgago}" ;;
+  esac
+fi
+
 SEP="  ·  "
 
 # ── assemble output ───────────────────────────────────────────────────────────
@@ -187,6 +214,7 @@ add1 "${branch:+${BLUE}${branch}${RESET}}" "$branch"
 add1 "${model:+${PURPLE}${model}${RESET}}" "$model"
 add1 "$effort_str" "$effort_p"
 add1 "$ctx_str" "$ctx_p"
+add1 "$kg_str" "$kg_p"
 
 add2 "$five_str" "$five_p"
 add2 "$seven_str" "$seven_p"
