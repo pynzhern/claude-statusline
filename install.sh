@@ -58,7 +58,8 @@ esac
 mkdir -p "$CLAUDE_DIR"
 cp "$SCRIPT_DIR/statusline-command.sh" "$CLAUDE_DIR/statusline-command.sh"
 cp "$SCRIPT_DIR/statusline-usage.py"   "$CLAUDE_DIR/statusline-usage.py"
-chmod +x "$CLAUDE_DIR/statusline-command.sh"
+cp "$SCRIPT_DIR/effort-hook.sh"        "$CLAUDE_DIR/effort-hook.sh"
+chmod +x "$CLAUDE_DIR/statusline-command.sh" "$CLAUDE_DIR/effort-hook.sh"
 ok "scripts copied to $CLAUDE_DIR"
 
 # ── patch settings.json ────────────────────────────────────────────────────────
@@ -86,19 +87,28 @@ s['statusLine'] = {
 # add Stop hook: zero _cached_at so the next render fetches fresh data,
 # but keep the stale values so they can be served as a fallback if the
 # API call fails (better than showing nothing).
+# also add UserPromptSubmit hook to track session-only /effort max
+# (avoid backticks here — this heredoc is unquoted so shell would try
+# to run them as command substitution before python ever sees the text).
 hooks = s.get('hooks', {})
-stop  = hooks.get('Stop', [])
 
-cache_cmd = """python3 -c "import json,os; f='/tmp/claude_usage_cache.json'; d=json.load(open(f)) if os.path.exists(f) else {}; d['_cached_at']=0; json.dump(d,open(f,'w'))" 2>/dev/null || true"""
-already   = any(
-    any(h.get('command') == cache_cmd for h in entry.get('hooks', []))
-    for entry in stop
-)
-if not already:
-    stop.append({'hooks': [{'type': 'command', 'command': cache_cmd}]})
+def ensure_hook(event, cmd):
+    entries = hooks.get(event, [])
+    already = any(
+        any(h.get('command') == cmd for h in entry.get('hooks', []))
+        for entry in entries
+    )
+    if not already:
+        entries.append({'hooks': [{'type': 'command', 'command': cmd}]})
+    hooks[event] = entries
 
-hooks['Stop'] = stop
-s['hooks']    = hooks
+cache_cmd  = """python3 -c "import json,os; f='/tmp/claude_usage_cache.json'; d=json.load(open(f)) if os.path.exists(f) else {}; d['_cached_at']=0; json.dump(d,open(f,'w'))" 2>/dev/null || true"""
+effort_cmd = 'sh $CLAUDE_DIR/effort-hook.sh'
+
+ensure_hook('Stop',              cache_cmd)
+ensure_hook('UserPromptSubmit',  effort_cmd)
+
+s['hooks'] = hooks
 
 with open(path, 'w') as f:
     json.dump(s, f, indent=2)
@@ -106,7 +116,7 @@ with open(path, 'w') as f:
 print('settings.json updated')
 PYEOF
 
-ok "settings.json patched (statusLine + Stop hook)"
+ok "settings.json patched (statusLine + Stop + UserPromptSubmit hooks)"
 
 # ── smoke test ─────────────────────────────────────────────────────────────────
 echo ""

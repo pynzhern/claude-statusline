@@ -3,18 +3,20 @@
 # runs on every response + every 60s, so minimise subshells and forks.
 
 # ── parse session JSON in a single jq call ────────────────────────────────────
-# jq emits three fields separated by newlines (one per line); we use
+# jq emits four fields separated by newlines (one per line); we use
 # newlines instead of tabs because POSIX `read` treats leading tabs as
 # IFS whitespace and would collapse empty fields.
 {
   IFS= read -r cwd
   IFS= read -r model
   IFS= read -r used
+  IFS= read -r session_id
 } <<EOF
 $(jq -r '
     (.cwd // .workspace.current_dir // ""),
     (.model.display_name // ""),
-    (.context_window.used_percentage // 0)
+    (.context_window.used_percentage // 0),
+    (.session_id // "")
   ')
 EOF
 
@@ -32,9 +34,21 @@ if [ -n "$cwd" ]; then
   fi
 fi
 
-# effort level is not in the session JSON; read the persistent setting.
-# session-only overrides (/effort max etc.) are not visible to the statusline.
-effort=$(jq -r '.effortLevel // ""' ~/.claude/settings.json 2>/dev/null)
+# effort level is not in the session JSON, so we assemble it from two sources
+# with a clear priority order:
+#   1. /tmp/claude-effort-<session_id> — written by the UserPromptSubmit hook
+#      (effort-hook.sh) when the user types `/effort max`. max is session-only
+#      in Claude Code and never touches settings.json, so the hook is the only
+#      way the statusline can observe it.
+#   2. .effortLevel in ~/.claude/settings.json — the persistent default, which
+#      covers low/medium/high/xhigh/auto (all of which Claude Code persists).
+# using `read < file` avoids a `cat` fork on the hot path.
+effort=""
+if [ -n "$session_id" ]; then
+  _marker="/tmp/claude-effort-${session_id}"
+  [ -f "$_marker" ] && IFS= read -r effort < "$_marker" 2>/dev/null || true
+fi
+[ -z "$effort" ] && effort=$(jq -r '.effortLevel // ""' ~/.claude/settings.json 2>/dev/null)
 
 # ── ANSI colour codes ─────────────────────────────────────────────────────────
 ESC=$(printf '\033')

@@ -18,6 +18,10 @@ portfolio  ·  main*  ·  claude-sonnet-4-6  ·  ctx 51% [▓▓▓▓▓░░�
 
 **Colours:** green → amber (≥50%) → red (≥80%). Usage data refreshes after every Claude response and every 60 seconds in the background.
 
+### Effort level
+
+The statusline shows the current `/effort` level (`low`, `medium`, `high`, `xhigh`, `max`, `auto`). Most levels are persisted to `~/.claude/settings.json` by Claude Code, but **`max` is session-only** and never written to disk — so a small `UserPromptSubmit` hook (`effort-hook.sh`) watches for `/effort max` and writes a session-scoped marker at `/tmp/claude-effort-<session_id>`. The statusline prefers the marker over `settings.json`, and the hook clears the marker when you switch to any persisted level. Stale markers (>24h) are pruned automatically.
+
 ## Requirements
 
 - [Claude Code](https://claude.ai/code) CLI
