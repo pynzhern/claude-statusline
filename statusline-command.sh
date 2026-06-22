@@ -11,14 +11,49 @@
   IFS= read -r model
   IFS= read -r used
   IFS= read -r session_id
+  IFS= read -r transcript
 } <<EOF
 $(jq -r '
     (.cwd // .workspace.current_dir // ""),
     (.model.display_name // ""),
     (.context_window.used_percentage // 0),
-    (.session_id // "")
+    (.session_id // ""),
+    (.transcript_path // "")
   ')
 EOF
+
+# ── model ground truth from the transcript ────────────────────────────────────
+# .model.display_name in the piped JSON can lie: opening the /model picker and
+# cancelling the confirmation still updates it (e.g. shows "Opus 4.8" while the
+# session is actually still on Fable 5). the transcript JSONL records the truth:
+#   - every assistant message carries the model id that actually produced it
+#   - a CONFIRMED /model switch logs a system local_command event whose stdout
+#     says "Set model to <name> …" (cancelled/failed switches never get that
+#     stdout), so a confirmed switch shows instantly with no one-message lag.
+# whichever of the two appears last in the transcript wins. only the tail is
+# scanned to keep the hot path cheap; brand-new sessions with no assistant
+# message yet fall back to the (then-correct) piped display name.
+if [ -n "$transcript" ] && [ -f "$transcript" ]; then
+  _mid=$(tail -n 200 "$transcript" 2>/dev/null \
+    | jq -r '
+        if .type == "assistant" then (.message.model // empty)
+        elif .type == "system" and .subtype == "local_command" then
+          (.content // "" | gsub("<[^>]*>"; "")
+            | try (capture("Set model to (?<m>.*?)(?: and saved.*)?$").m) // empty)
+        else empty end' 2>/dev/null \
+    | tail -n 1)
+  if [ -n "$_mid" ]; then
+    # prettify the id: claude-opus-4-8-20250101 → "Opus 4.8"
+    model=$(printf '%s' "$_mid" | sed -E '
+      s/^claude-//;
+      s/-[0-9]{8}$//;
+      s/-([0-9]+)-([0-9]+)$/ \1.\2/;
+      s/-([0-9]+)$/ \1/;
+      s/-/ /g')
+    # capitalise each word (Fable 5, Opus 4.8, Sonnet 4.6 …)
+    model=$(printf '%s' "$model" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)} 1')
+  fi
+fi
 
 folder=""
 branch=""
@@ -109,6 +144,13 @@ else
 fi
 
 # ── claude plan usage (cached via python helper, 5-min TTL) ───────────────────
+# the helper needs pycryptodome + curl_cffi to decrypt the claude.ai cookie and
+# fetch usage. those live in the framework python (3.11), NOT in brew's bare
+# `python3` (3.14+ after a homebrew upgrade ships an empty site-packages and
+# orphans every pip package). pin to the interpreter that has the deps, falling
+# back to bare python3 so a fresh machine still runs (it just shows stale usage).
+USAGE_PY=/usr/local/bin/python3
+[ -x "$USAGE_PY" ] || USAGE_PY=python3
 # parse all six usage fields in a single jq call; newline-delimited output
 # so empty fields are preserved by POSIX `read`.
 {
@@ -119,7 +161,7 @@ fi
   IFS= read -r bal
   IFS= read -r cur
 } <<EOF
-$(python3 ~/.claude/statusline-usage.py 2>/dev/null | jq -r '
+$("$USAGE_PY" ~/.claude/statusline-usage.py 2>/dev/null | jq -r '
     (.five_hour_pct       // ""),
     (.five_hour_resets_in // ""),
     (.seven_day_pct       // ""),
@@ -155,39 +197,64 @@ else
   seven_str=""; seven_p=""
 fi
 
-# prepaid credit balance
-if [ -n "$bal" ]; then
+# prepaid credit balance — hidden at exactly 0.00 (no signal, just width)
+if [ -n "$bal" ] && [ "$bal" != "0.00" ] && [ "$bal" != "0" ]; then
   extra_str="${WHITE}bal ${cur} ${bal}${RESET}"
   extra_p="bal ${cur} ${bal}"
 else
   extra_str=""; extra_p=""
 fi
 
-# ── obsidian knowledge-graph freshness ───────────────────────────────────────
-# ambient confidence that the Obsidian KG auto-refresh is running. reads only the
-# tiny state file + one log scan (cheap). green = healthy, shows time since last
-# successful refresh; red = the most recent vault build failed. the ⇄ glyph reads
-# as a sync indicator ("ObsKG, last synced N ago"); deliberately NOT the ↻ the
-# usage bars use for resets, so the two meanings stay visually distinct.
+# ── obsidian knowledge-graph health (alert-only) ─────────────────────────────
+# Silent when healthy: the auto-refresh runs every active turn, so a permanent
+# "ObsKG just now" chip was pure noise AND blind to the failure that actually
+# bit (the RAG reindex died silently for ~18 days while the vault kept building).
+# Now it only speaks up in red, for the two real failure modes:
+#   1. the most recent vault build failed/timed out, OR
+#   2. the RAG store fell behind graph.json (reindex is failing) — the tripwire
+#      that would have caught this week's bug.
 kg_str=""; kg_p=""
-_kgstate="$HOME/.claude-automation/.auto-refresh.state.json"
 _kglog="$HOME/.claude-automation/auto-refresh.log"
-if [ -f "$_kgstate" ]; then
-  _kglast=$(jq -r '.last_refresh_at // 0' "$_kgstate" 2>/dev/null)
-  _kgage=$(( $(date +%s) - ${_kglast%.*} ))
-  if   [ "$_kgage" -lt 90 ];    then _kgago="just now"
-  elif [ "$_kgage" -lt 3600 ];  then _kgago="$(( _kgage / 60 ))m ago"
-  elif [ "$_kgage" -lt 86400 ]; then _kgago="$(( _kgage / 3600 ))h ago"
-  else                               _kgago="$(( _kgage / 86400 ))d ago"
+_gj="$HOME/.claude-automation/graph.json"
+_vec="$HOME/.claude-automation/rag/store/vectors.npy"
+_kgevent=$(grep -E "refresh cc:|BUILD (FAILED|TIMED OUT)" "$_kglog" 2>/dev/null | tail -1)
+case "$_kgevent" in
+  *"BUILD FAILED"*|*"TIMED OUT"*)
+    kg_str="${RED}⇄ ObsKG build failed${RESET}"; kg_p="⇄ ObsKG build failed" ;;
+esac
+if [ -z "$kg_str" ] && [ -f "$_gj" ] && [ -f "$_vec" ]; then
+  _gjm=$(stat -f %m "$_gj" 2>/dev/null); _vm=$(stat -f %m "$_vec" 2>/dev/null)
+  if [ -n "$_gjm" ] && [ -n "$_vm" ] && [ $(( _gjm - _vm )) -gt 21600 ]; then
+    kg_str="${RED}⇄ ObsKG RAG stale${RESET}"; kg_p="⇄ ObsKG RAG stale"
   fi
-  # most recent build event in the log: refresh (ok) or a failure
-  _kgevent=$(grep -E "refresh cc:|BUILD (FAILED|TIMED OUT)" "$_kglog" 2>/dev/null | tail -1)
-  case "$_kgevent" in
-    *"BUILD FAILED"*|*"TIMED OUT"*)
-      kg_str="${RED}ObsKG build failed${RESET}"; kg_p="ObsKG build failed" ;;
-    *)
-      kg_str="${GREEN}⇄ ObsKG ${_kgago}${RESET}"; kg_p="⇄ ObsKG ${_kgago}" ;;
-  esac
+fi
+
+# ── council status (KG self-update) ───────────────────────────────────────────
+# Minimal: a single ⚖✓ glyph confirms the nightly 3am run happened and is clean
+# (pz wants a quick "it ran, not cocked up", not a verbose chip lingering all
+# day). It gets loud only when there's something to do or something's wrong:
+#   amber ⚖ N to review  — items queued (run review.py)
+#   red   ⚖ council: no run — the 3am job hasn't run in >30h (a night was skipped)
+# "did it run" is read from dryrun.log's mtime (the launchd StandardOutPath,
+# touched on EVERY run incl. quiet no-op nights), so it's independent of the
+# .last_run.json heartbeat. ⚖ (judgement) stays distinct from ObsKG's ⇄.
+council_str=""; council_p=""
+_cqueue="$HOME/.claude-automation/council/pending_review/QUEUE.jsonl"
+_clog="$HOME/.claude-automation/council/dryrun.log"
+_creview=0
+[ -f "$_cqueue" ] && _creview=$(grep -c '' "$_cqueue" 2>/dev/null)
+: "${_creview:=0}"
+_cage=999999
+if [ -f "$_clog" ]; then
+  _cm=$(stat -f %m "$_clog" 2>/dev/null)
+  [ -n "$_cm" ] && _cage=$(( $(date +%s) - _cm ))
+fi
+if [ "$_cage" -gt 108000 ]; then
+  council_str="${RED}⚖ council: no run${RESET}"; council_p="⚖ council: no run"
+elif [ "$_creview" -gt 0 ] 2>/dev/null; then
+  council_str="${AMBER}⚖ council: ${_creview} to review${RESET}"; council_p="⚖ council: ${_creview} to review"
+else
+  council_str="${GREEN}⚖ council: ✓${RESET}"; council_p="⚖ council: ✓"
 fi
 
 SEP="  ·  "
@@ -215,6 +282,7 @@ add1 "${model:+${PURPLE}${model}${RESET}}" "$model"
 add1 "$effort_str" "$effort_p"
 add1 "$ctx_str" "$ctx_p"
 add1 "$kg_str" "$kg_p"
+add1 "$council_str" "$council_p"
 
 add2 "$five_str" "$five_p"
 add2 "$seven_str" "$seven_p"
@@ -232,7 +300,12 @@ fi
 # else fall back to 0 which forces the safe two-line split.
 term_w=${COLUMNS:-$(stty size 2>/dev/null </dev/tty | cut -d' ' -f2)}
 : "${term_w:=0}"
-if [ "${#full_p}" -le "$term_w" ]; then
+# ⚖ renders ~2 cols but bash ${#} counts it as 1 — add the undercount back so a
+# line that visually overflows the terminal still trips the two-line split
+# instead of being clipped with an ellipsis by the host.
+_wide=$(printf '%s' "$full_p" | grep -o '⚖' | wc -l | tr -d ' ')
+vis_w=$(( ${#full_p} + _wide ))
+if [ "$vis_w" -le "$term_w" ]; then
   printf '%s' "$full_c"
 elif [ -n "$l2c" ]; then
   printf '%s\n%s' "$l1c" "$l2c"
