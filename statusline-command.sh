@@ -230,24 +230,34 @@ if [ -z "$kg_str" ] && [ -f "$_gj" ] && [ -f "$_vec" ]; then
 fi
 
 # ── council status (KG self-update) ───────────────────────────────────────────
-# Minimal: a single ⚖✓ glyph confirms the nightly 3am run happened and is clean
-# (pz wants a quick "it ran, not cocked up", not a verbose chip lingering all
-# day). It gets loud only when there's something to do or something's wrong:
-#   amber ⚖ N to review  — items queued (run review.py)
-#   red   ⚖ council: no run — the 3am job hasn't run in >30h (a night was skipped)
-# "did it run" is read from dryrun.log's mtime (the launchd StandardOutPath,
-# touched on EVERY run incl. quiet no-op nights), so it's independent of the
-# .last_run.json heartbeat. ⚖ (judgement) stays distinct from ObsKG's ⇄.
+# Minimal: a single '⚖ council: ✓' confirms the nightly 3am run happened and is
+# clean (pz wants a quick "it ran, not cocked up", not a verbose chip lingering
+# all day). It gets loud only when there's something to do or something's wrong:
+#   amber ⚖ council: N to review  — items queued (run review.py)
+#   red   ⚖ council: no run       — no run in >30h (a night was skipped)
+# "did it run + when" uses .last_run.json .ts (the structured heartbeat phase2
+# writes on EVERY --daily run, incl. quiet no-op nights), with dryrun.log mtime
+# (the launchd StandardOutPath, bumped on every execution) as a fallback — take
+# whichever is fresher so a missing/lagging heartbeat never trips a false alarm.
+# ⚖ (judgement) stays distinct from ObsKG's ⇄.
 council_str=""; council_p=""
 _cqueue="$HOME/.claude-automation/council/pending_review/QUEUE.jsonl"
+_crun="$HOME/.claude-automation/council/.last_run.json"
 _clog="$HOME/.claude-automation/council/dryrun.log"
 _creview=0
 [ -f "$_cqueue" ] && _creview=$(grep -c '' "$_cqueue" 2>/dev/null)
 : "${_creview:=0}"
 _cage=999999
+if [ -f "$_crun" ]; then
+  _cts=$(jq -r '.ts // ""' "$_crun" 2>/dev/null)
+  if [ -n "$_cts" ]; then
+    _ce=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$_cts" +%s 2>/dev/null)
+    [ -n "$_ce" ] && _cage=$(( $(date +%s) - _ce ))
+  fi
+fi
 if [ -f "$_clog" ]; then
   _cm=$(stat -f %m "$_clog" 2>/dev/null)
-  [ -n "$_cm" ] && _cage=$(( $(date +%s) - _cm ))
+  if [ -n "$_cm" ]; then _la=$(( $(date +%s) - _cm )); [ "$_la" -lt "$_cage" ] && _cage=$_la; fi
 fi
 if [ "$_cage" -gt 108000 ]; then
   council_str="${RED}⚖ council: no run${RESET}"; council_p="⚖ council: no run"
