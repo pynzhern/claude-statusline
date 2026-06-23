@@ -315,7 +315,11 @@ term_w=${COLUMNS:-$(stty size 2>/dev/null </dev/tty | cut -d' ' -f2)}
 # instead of being clipped with an ellipsis by the host.
 _wide=$(printf '%s' "$full_p" | grep -o '⚖' | wc -l | tr -d ' ')
 vis_w=$(( ${#full_p} + _wide ))
-if [ "$vis_w" -le "$term_w" ]; then
+# require a 2-col headroom rather than an exact fit: COLUMNS can overstate the
+# usable statusline width by a column or two (host-reserved columns, the
+# terminal's un-writable final cell, residual wide-glyph undercount), and at
+# zero margin any of those clips the line with an ellipsis instead of wrapping.
+if [ "$(( vis_w + 2 ))" -le "$term_w" ]; then
   printf '%s' "$full_c"
 elif [ -n "$l2c" ]; then
   printf '%s\n%s' "$l1c" "$l2c"
