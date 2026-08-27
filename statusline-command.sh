@@ -3,22 +3,40 @@
 # runs on every response + every 60s, so minimise subshells and forks.
 
 # ── parse session JSON in a single jq call ────────────────────────────────────
-# jq emits four fields separated by newlines (one per line); we use
-# newlines instead of tabs because POSIX `read` treats leading tabs as
-# IFS whitespace and would collapse empty fields.
+# one field per line; newlines rather than tabs because POSIX `read` treats
+# leading tabs as IFS whitespace and would collapse empty fields.
+# the last eight are optional and only present on newer Claude Code builds
+# (2.1.x): live effort level, native plan-usage windows, open PR, and the
+# model's context size. each degrades to "" on older builds.
 {
   IFS= read -r cwd
   IFS= read -r model
   IFS= read -r used
   IFS= read -r session_id
   IFS= read -r transcript
+  IFS= read -r effort
+  IFS= read -r n_five_pct
+  IFS= read -r n_five_at
+  IFS= read -r n_seven_pct
+  IFS= read -r n_seven_at
+  IFS= read -r pr_num
+  IFS= read -r pr_state
+  IFS= read -r ctx_size
 } <<EOF
 $(jq -r '
     (.cwd // .workspace.current_dir // ""),
     (.model.display_name // ""),
     (.context_window.used_percentage // 0),
     (.session_id // ""),
-    (.transcript_path // "")
+    (.transcript_path // ""),
+    (.effort.level // ""),
+    (.rate_limits.five_hour.used_percentage // ""),
+    (.rate_limits.five_hour.resets_at // ""),
+    (.rate_limits.seven_day.used_percentage // ""),
+    (.rate_limits.seven_day.resets_at // ""),
+    (.pr.number // ""),
+    (.pr.review_state // ""),
+    (.context_window.context_window_size // "")
   ')
 EOF
 
@@ -69,20 +87,10 @@ if [ -n "$cwd" ]; then
   fi
 fi
 
-# effort level is not in the session JSON, so we assemble it from two sources
-# with a clear priority order:
-#   1. /tmp/claude-effort-<session_id> — written by the UserPromptSubmit hook
-#      (effort-hook.sh) when the user types `/effort max`. max is session-only
-#      in Claude Code and never touches settings.json, so the hook is the only
-#      way the statusline can observe it.
-#   2. .effortLevel in ~/.claude/settings.json — the persistent default, which
-#      covers low/medium/high/xhigh/auto (all of which Claude Code persists).
-# using `read < file` avoids a `cat` fork on the hot path.
-effort=""
-if [ -n "$session_id" ]; then
-  _marker="/tmp/claude-effort-${session_id}"
-  [ -f "$_marker" ] && IFS= read -r effort < "$_marker" 2>/dev/null || true
-fi
+# effort level: Claude Code 2.1.x pipes the live session level as .effort.level
+# (including the session-only `max`, which never reaches settings.json). older
+# builds omit the field, so fall back to the persisted .effortLevel — on those
+# builds `max` simply isn't observable and shows as the persisted default.
 [ -z "$effort" ] && effort=$(jq -r '.effortLevel // ""' ~/.claude/settings.json 2>/dev/null)
 
 # ── ANSI colour codes ─────────────────────────────────────────────────────────
@@ -104,8 +112,8 @@ RESET="${ESC}[0m"
 # hot path. inputs may be floats (e.g. 17.5); we truncate to an int for
 # comparison which is fine for the coarse 50/80 thresholds used throughout.
 # 10 segments × 8 unicode sub-steps = 80 effective levels (~1.25% per step).
-# filled segments use ▓, the transition uses a fractional block (▏▎▍▌▋▊▉),
-# and empty segments use ░ — total bar width stays exactly 10 characters.
+# filled segments use █, the transition uses a fractional block (▏▎▍▌▋▊▉),
+# and empty segments are spaces — total bar width stays exactly 10 characters.
 render_bar() {
   _p=${1%%.*}; [ -z "$_p" ] && _p=0
   if   [ "$_p" -ge "$3" ]; then col="$RED"
@@ -130,10 +138,50 @@ render_bar() {
   bar="${col}${_body}${RESET}"
 }
 
-# ── context window bar ────────────────────────────────────────────────────────
+# fmt_until <epoch-seconds> — countdown to a unix timestamp, rounded UP to the
+# minute, in the same shape the python helper emits (4d15h / 3h05m / 12m). sets
+# the global `until`; pure shell arithmetic, one `date` fork.
+fmt_until() {
+  _secs=$(( ${1%%.*} - $(date +%s) ))
+  [ "$_secs" -lt 0 ] && _secs=0
+  _mins=$(( (_secs + 59) / 60 ))
+  _d=$(( _mins / 1440 )); _h=$(( (_mins % 1440) / 60 )); _m=$(( _mins % 60 ))
+  if   [ "$_d" -gt 0 ]; then [ "$_h" -gt 0 ] && until="${_d}d${_h}h" || until="${_d}d"
+  elif [ "$_h" -gt 0 ]; then
+    if [ "$_m" -gt 0 ]; then until="${_h}h$(printf '%02d' "$_m")m"; else until="${_h}h"; fi
+  else until="${_m}m"
+  fi
+}
+
+# ── context window ────────────────────────────────────────────────────────────
+# percentage only, no bar: line 1 shares the terminal with line 2's usage bars,
+# and the bar spent 12 columns on information the number already carries.
+# render_bar is still called for its threshold colour (green/amber/red on the %).
+# a size suffix appears only when the window is NOT the 200k default (e.g.
+# `ctx 22%/1M`) — 22% of 1M and 22% of 200k are very different amounts of room.
 render_bar "$used" 50 80
-ctx_str="${col}ctx ${used%.*}%${RESET} [${bar}]"
-ctx_p="ctx ${used%.*}% [          ]"
+ctx_sfx=""
+if [ -n "$ctx_size" ] && [ "${ctx_size%%.*}" -ne 200000 ] 2>/dev/null; then
+  if [ "${ctx_size%%.*}" -ge 1000000 ]; then ctx_sfx="/$(( ${ctx_size%%.*} / 1000000 ))M"
+  else ctx_sfx="/$(( ${ctx_size%%.*} / 1000 ))k"; fi
+fi
+ctx_str="${col}ctx ${used%.*}%${ctx_sfx}${RESET}"
+ctx_p="ctx ${used%.*}%${ctx_sfx}"
+
+# ── open PR badge ─────────────────────────────────────────────────────────────
+# `#42` after the branch, coloured by review state so the number alone tells
+# you whether it's mergeable: green approved · amber pending · red changes
+# requested · grey draft. only present when Claude Code detects an open PR/MR.
+pr_str=""; pr_p=""
+if [ -n "$pr_num" ]; then
+  case "$pr_state" in
+    approved)          _prc="$GREEN" ;;
+    changes_requested) _prc="$RED" ;;
+    draft)             _prc="$GRAY" ;;
+    *)                 _prc="$AMBER" ;;
+  esac
+  pr_str="${_prc}#${pr_num}${RESET}"; pr_p="#${pr_num}"
+fi
 
 # ── effort level indicator ────────────────────────────────────────────────────
 if [ -n "$effort" ]; then
@@ -143,16 +191,28 @@ else
   effort_str=""; effort_p=""
 fi
 
-# ── claude plan usage (cached via python helper, 5-min TTL) ───────────────────
-# the helper needs pycryptodome + curl_cffi to decrypt the claude.ai cookie and
-# fetch usage. those live in the framework python (3.11), NOT in brew's bare
-# `python3` (3.14+ after a homebrew upgrade ships an empty site-packages and
-# orphans every pip package). pin to the interpreter that has the deps, falling
-# back to bare python3 so a fresh machine still runs (it just shows stale usage).
+# ── claude plan usage ─────────────────────────────────────────────────────────
+# two sources, merged:
+#   1. native — Claude Code 2.1.x pipes .rate_limits.{five_hour,seven_day} from
+#      this session's own response headers. no cookies, no deps, works for any
+#      claude.ai subscriber. but: absent until the first response of a session,
+#      and blind to usage racked up by OTHER concurrent sessions until this one
+#      makes its next call.
+#   2. python helper (statusline-usage.py, 5-min cache) — decrypts the desktop
+#      app's claude.ai cookie and polls the org usage endpoint. the only source
+#      for the model-scoped weekly cap (e.g. fable) and the prepaid balance, and
+#      it fills the 5h/7d gap before the first response.
+# native wins for 5h/7d whenever present (it's this session's ground truth);
+# the helper is authoritative for everything else.
+# the helper needs pycryptodome + curl_cffi. those live in the framework python
+# (3.11), NOT in brew's bare `python3` (3.14+ after a homebrew upgrade ships an
+# empty site-packages and orphans every pip package). pin to the interpreter
+# that has the deps, falling back to bare python3 so a fresh machine still runs
+# (it just shows native-only usage).
 USAGE_PY=/usr/local/bin/python3
 [ -x "$USAGE_PY" ] || USAGE_PY=python3
-# parse all six usage fields in a single jq call; newline-delimited output
-# so empty fields are preserved by POSIX `read`.
+# parse all helper fields in a single jq call; newline-delimited output so
+# empty fields are preserved by POSIX `read`.
 {
   IFS= read -r five_pct
   IFS= read -r five_reset
@@ -160,6 +220,8 @@ USAGE_PY=/usr/local/bin/python3
   IFS= read -r seven_reset
   IFS= read -r bal
   IFS= read -r cur
+  IFS= read -r scoped_pct
+  IFS= read -r scoped_label
 } <<EOF
 $("$USAGE_PY" ~/.claude/statusline-usage.py 2>/dev/null | jq -r '
     (.five_hour_pct       // ""),
@@ -167,9 +229,22 @@ $("$USAGE_PY" ~/.claude/statusline-usage.py 2>/dev/null | jq -r '
     (.seven_day_pct       // ""),
     (.seven_day_resets_in // ""),
     (.prepaid_balance     // ""),
-    (.prepaid_currency    // "SGD")
+    (.prepaid_currency    // "SGD"),
+    (.scoped_pct          // ""),
+    (.scoped_label        // "")
   ' 2>/dev/null)
 EOF
+
+# native override. used_percentage is utilization*100 as a float with FP noise
+# (e.g. 55.00000001) — truncate. resets_at is epoch seconds → format here.
+if [ -n "$n_five_pct" ]; then
+  five_pct=${n_five_pct%%.*}
+  five_reset=""; [ -n "$n_five_at" ] && { fmt_until "$n_five_at"; five_reset=$until; }
+fi
+if [ -n "$n_seven_pct" ]; then
+  seven_pct=${n_seven_pct%%.*}
+  seven_reset=""; [ -n "$n_seven_at" ] && { fmt_until "$n_seven_at"; seven_reset=$until; }
+fi
 
 # 5-hour session bar
 if [ -n "$five_pct" ]; then
@@ -195,6 +270,22 @@ if [ -n "$seven_pct" ]; then
   fi
 else
   seven_str=""; seven_p=""
+fi
+
+# model-scoped weekly cap (e.g. fable on Max) — the second, tighter weekly
+# limit that bites before the all-model 7d one does. the label comes from the
+# API (scope.model.display_name), so this tracks whichever model is capped
+# rather than assuming fable forever. it shares 7d's reset instant exactly, so
+# the ↻ countdown is deliberately omitted: pure duplicated width on line 2.
+# rendered compact (no bar) for the same reason — line 2 already carries two
+# 10-segment bars, and a third pushed it past 80 cols where the host clips it.
+# absent (older plans, other cloners) → empty string → segment not rendered.
+if [ -n "$scoped_pct" ] && [ -n "$scoped_label" ]; then
+  render_bar "$scoped_pct" 50 80
+  scoped_str="${col}${scoped_label} ${scoped_pct}%${RESET}"
+  scoped_p="${scoped_label} ${scoped_pct}%"
+else
+  scoped_str=""; scoped_p=""
 fi
 
 # prepaid credit balance — hidden at exactly 0.00 (no signal, just width)
@@ -233,22 +324,28 @@ fi
 # Minimal: a single '⚖ council: ✓' confirms the nightly 3am run happened and is
 # clean (pz wants a quick "it ran, not cocked up", not a verbose chip lingering
 # all day). It gets loud only when there's something to do or something's wrong:
-#   amber ⚖ council: N to review  — items queued (run review.py)
-#   red   ⚖ council: no run       — no run in >30h (a night was skipped)
+#   amber ⚖ council: N queued  — items awaiting review (run review.py)
+#   red   ⚖ council: no run    — no run in >30h (a night was skipped)
 # "did it run + when" uses .last_run.json .ts (the structured heartbeat phase2
 # writes on EVERY --daily run, incl. quiet no-op nights), with dryrun.log mtime
 # (the launchd StandardOutPath, bumped on every execution) as a fallback — take
 # whichever is fresher so a missing/lagging heartbeat never trips a false alarm.
 # ⚖ (judgement) stays distinct from ObsKG's ⇄.
+# self-guarding like the ObsKG segment: with no council dir at all (anyone
+# cloning the public repo) the whole block is skipped, otherwise the "no run"
+# branch would light up red permanently on a machine that has no council.
 council_str=""; council_p=""
-_cqueue="$HOME/.claude-automation/council/pending_review/QUEUE.jsonl"
-_crun="$HOME/.claude-automation/council/.last_run.json"
-_clog="$HOME/.claude-automation/council/dryrun.log"
+_cdir="$HOME/.claude-automation/council"
+_cqueue="$_cdir/pending_review/QUEUE.jsonl"
+_crun="$_cdir/.last_run.json"
+_clog="$_cdir/dryrun.log"
 _creview=0
 [ -f "$_cqueue" ] && _creview=$(grep -c '' "$_cqueue" 2>/dev/null)
 : "${_creview:=0}"
 _cage=999999
-if [ -f "$_crun" ]; then
+if [ ! -d "$_cdir" ]; then
+  _cage=0; _creview=-1
+elif [ -f "$_crun" ]; then
   _cts=$(jq -r '.ts // ""' "$_crun" 2>/dev/null)
   if [ -n "$_cts" ]; then
     _ce=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$_cts" +%s 2>/dev/null)
@@ -259,10 +356,12 @@ if [ -f "$_clog" ]; then
   _cm=$(stat -f %m "$_clog" 2>/dev/null)
   if [ -n "$_cm" ]; then _la=$(( $(date +%s) - _cm )); [ "$_la" -lt "$_cage" ] && _cage=$_la; fi
 fi
-if [ "$_cage" -gt 108000 ]; then
+if [ "$_creview" -lt 0 ]; then
+  : # no council on this machine — render nothing
+elif [ "$_cage" -gt 108000 ]; then
   council_str="${RED}⚖ council: no run${RESET}"; council_p="⚖ council: no run"
 elif [ "$_creview" -gt 0 ] 2>/dev/null; then
-  council_str="${AMBER}⚖ council: ${_creview} to review${RESET}"; council_p="⚖ council: ${_creview} to review"
+  council_str="${AMBER}⚖ council: ${_creview} queued${RESET}"; council_p="⚖ council: ${_creview} queued"
 else
   council_str="${GREEN}⚖ council: ✓${RESET}"; council_p="⚖ council: ✓"
 fi
@@ -288,6 +387,7 @@ add2() {
 
 add1 "${folder:+${CYAN}${folder}${RESET}}" "$folder"
 add1 "${branch:+${BLUE}${branch}${RESET}}" "$branch"
+add1 "$pr_str" "$pr_p"
 add1 "${model:+${PURPLE}${model}${RESET}}" "$model"
 add1 "$effort_str" "$effort_p"
 add1 "$ctx_str" "$ctx_p"
@@ -296,6 +396,7 @@ add1 "$council_str" "$council_p"
 
 add2 "$five_str" "$five_p"
 add2 "$seven_str" "$seven_p"
+add2 "$scoped_str" "$scoped_p"
 add2 "$extra_str" "$extra_p"
 
 # join into one candidate line, compare visible width against terminal width

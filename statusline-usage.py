@@ -115,6 +115,8 @@ def emit(data):
         out['five_hour_resets_in'] = time_until(out.pop('five_hour_resets_at'))
     if 'seven_day_resets_at' in out:
         out['seven_day_resets_in'] = time_until(out.pop('seven_day_resets_at'))
+    if 'scoped_resets_at' in out:
+        out['scoped_resets_in'] = time_until(out.pop('scoped_resets_at'))
     print(json.dumps(out))
 
 def main():
@@ -129,7 +131,7 @@ def main():
         now = datetime.now(timezone.utc)
         window_reset = any(
             datetime.fromisoformat(data[k].replace('Z', '+00:00')) <= now
-            for k in ('five_hour_resets_at', 'seven_day_resets_at')
+            for k in ('five_hour_resets_at', 'seven_day_resets_at', 'scoped_resets_at')
             if data.get(k)
         )
         if time.time() - data.get('_cached_at', 0) < CACHE_TTL and not window_reset:
@@ -160,6 +162,23 @@ def main():
         if sd:
             result['seven_day_pct']       = int(sd.get('utilization', 0))
             result['seven_day_resets_at'] = sd.get('resets_at', '')
+
+        # model-scoped weekly cap (e.g. Fable on Max) — the legacy top-level
+        # seven_day_opus/seven_day_sonnet fields are dead (always null); the live
+        # data is a kind == 'weekly_scoped' entry in the limits[] array, whose
+        # scope.model.display_name names the model being capped. read the label
+        # from the payload rather than hardcoding it: which model gets its own
+        # weekly cap changes with the plan/rollout. is_active is deliberately
+        # NOT filtered on — it means 'currently the binding limit', so both
+        # weekly entries sit at false while the 5h window is the active one.
+        scoped = next((l for l in (usage.get('limits') or [])
+                       if l.get('kind') == 'weekly_scoped'), None)
+        if scoped:
+            name = ((scoped.get('scope') or {}).get('model') or {}).get('display_name') or ''
+            if name:
+                result['scoped_label']     = name.lower()
+                result['scoped_pct']       = int(scoped.get('percent', 0))
+                result['scoped_resets_at'] = scoped.get('resets_at', '')
 
         if prepaid and 'amount' in prepaid:
             amount   = prepaid['amount']          # in minor units (cents)

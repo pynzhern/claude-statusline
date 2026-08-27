@@ -1,37 +1,53 @@
 # claude-statusline
 
-A rich statusline for [Claude Code](https://claude.ai/code) that shows your working context, model, context window usage, and live Claude.ai plan limits — all colour-coded.
+A rich statusline for [Claude Code](https://claude.ai/code): working context, model, effort, context window, and live Claude.ai plan limits — colour-coded, and wrapped to one or two lines depending on how wide your terminal is.
 
 ```
-portfolio  ·  main*  ·  claude-sonnet-4-6  ·  ctx 51% [▓▓▓▓▓░░░░░]  ·  5h 62% [▓▓▓▓▓▓░░░░] ↻3h13m  ·  7d 19% [▓▓░░░░░░░░] ↻4d21h  ·  bal SGD 15.59
+portfolio  ·  main*  ·  #42  ·  Fable 5  ·  high  ·  ctx 22%  ·  5h 55% [█████▌    ] ↻3h22m  ·  7d 41% [████      ] ↻4d15h  ·  fable 40%
 ```
 
-| Section | What it shows |
-|---|---|
-| `portfolio` | Basename of current working directory |
-| `main*` | Git branch (`*` = uncommitted changes) |
-| `claude-sonnet-4-6` | Active model |
-| `ctx 51% [▓▓▓▓▓░░░░░]` | Context window used |
-| `5h 62% [▓▓▓▓▓▓░░░░] ↻3h13m` | 5-hour session plan limit + reset countdown |
-| `7d 19% [▓▓░░░░░░░░] ↻4d21h` | 7-day weekly plan limit + reset countdown |
-| `bal SGD 15.59` | Prepaid credit balance |
+| Segment | What it shows | Source |
+|---|---|---|
+| `portfolio` | Basename of the current working directory | stdin |
+| `main*` | Git branch (`*` = uncommitted changes) | `git` |
+| `#42` | Open PR/MR for the branch — green approved · amber pending · red changes requested · grey draft | stdin (Claude Code ≥ 2.1) |
+| `Fable 5` | Model that actually produced the last response | transcript |
+| `high` | Live `/effort` level, including the session-only `max` | stdin (Claude Code ≥ 2.1) |
+| `ctx 22%` | Context window used; `ctx 22%/1M` when the window isn't the 200k default | stdin |
+| `5h 55% […] ↻3h22m` | 5-hour session limit + reset countdown | stdin (native) or cookie helper |
+| `7d 41% […] ↻4d15h` | 7-day weekly limit + reset countdown | stdin (native) or cookie helper |
+| `fable 40%` | Model-scoped weekly cap (plans that cap one model separately) | cookie helper |
+| `bal SGD 15.59` | Prepaid credit balance — hidden at zero | cookie helper |
 
-**Colours:** green → amber (≥50%) → red (≥80%). Usage data refreshes after every Claude response and every 60 seconds in the background.
+**Colours:** green → amber (≥50%) → red (≥80%). Empty segments are dropped, so the line only ever shows what applies to you.
+
+### Model name from the transcript, not the payload
+
+`.model.display_name` in the piped JSON can lie: opening `/model` and cancelling the confirmation still updates it. The script instead reads the tail of the session transcript — every assistant message carries the model id that produced it, and a confirmed `/model` switch logs a `Set model to …` event — and prettifies the id (`claude-fable-5` → `Fable 5`). Brand-new sessions fall back to the payload until the first response.
 
 ### Effort level
 
-The statusline shows the current `/effort` level (`low`, `medium`, `high`, `xhigh`, `max`, `auto`). Most levels are persisted to `~/.claude/settings.json` by Claude Code, but **`max` is session-only** and never written to disk — so a small `UserPromptSubmit` hook (`effort-hook.sh`) watches for `/effort max` and writes a session-scoped marker at `/tmp/claude-effort-<session_id>`. The statusline prefers the marker over `settings.json`, and the hook clears the marker when you switch to any persisted level. Stale markers (>24h) are pruned automatically.
+Claude Code 2.1.x pipes the live level as `.effort.level`, including `max` (which is session-only and never written to `settings.json`). On older builds the field is absent and the script falls back to `.effortLevel` in `~/.claude/settings.json`, where `max` isn't observable.
 
-### Knowledge-graph freshness (optional)
+### Plan usage: two sources, merged
 
-If you keep a local knowledge graph that refreshes itself (e.g. an [Obsidian](https://obsidian.md) vault rebuilt by a background pipeline), the statusline can show how long ago it last synced — `⇄ ObsKG 12m ago`, or a red `ObsKG build failed` if the most recent build errored. The segment is **self-guarding**: it only renders if `~/.claude-automation/.auto-refresh.state.json` exists, so it stays invisible for everyone else. The `⇄` glyph is deliberately distinct from the `↻` used for plan resets, so the two never blur together.
+1. **Native** — Claude Code ≥ 2.1 pipes `.rate_limits.{five_hour,seven_day}` from the session's own response headers. No cookies, no Python deps, works for any claude.ai subscriber on any platform. Limitations: absent until the first response of a session, and blind to usage from *other* concurrent sessions until this one makes its next call.
+2. **Cookie helper** (`statusline-usage.py`) — decrypts the Claude desktop app's claude.ai session cookie and polls the org usage endpoint, cached 5 minutes. The only source for the model-scoped cap and the prepaid balance, and it fills the 5h/7d gap before the first response.
+
+Native wins for 5h/7d whenever present; the helper is authoritative for everything else. Without the helper you still get 5h/7d — just not `fable`/`bal`.
+
+### Knowledge-graph and council segments (optional, self-guarding)
+
+Two extra chips exist for a local Obsidian knowledge-graph pipeline (`~/.claude-automation`). Both render nothing unless that directory exists, so they're invisible for everyone else:
+
+- `⇄ ObsKG …` — **alert-only**: red `build failed` if the last vault build errored, red `RAG stale` if the vector store has fallen more than 6h behind `graph.json`. Silent when healthy.
+- `⚖ council: ✓` / `⚖ council: 2 queued` / `⚖ council: no run` — did the nightly review run, and is there anything waiting.
 
 ## Requirements
 
-- [Claude Code](https://claude.ai/code) CLI
-- Claude desktop app (macOS or Linux) — signed in to claude.ai
-- `python3`, `jq`
-- `pycryptodome`, `curl_cffi` Python packages (installed automatically by the installer)
+- [Claude Code](https://claude.ai/code) ≥ 2.1 for the native effort/usage/PR fields (older builds still work, with fewer segments)
+- `jq`, `python3`
+- For the cookie helper (`fable` cap + balance): macOS, the Claude desktop app signed in to claude.ai, and `pycryptodome` + `curl_cffi` installed into **the interpreter the statusline runs** — `/usr/local/bin/python3` (framework Python) if it exists, else `python3`. The installer handles this, including Homebrew's PEP 668 refusal.
 
 ## Install
 
@@ -42,45 +58,44 @@ chmod +x install.sh
 ./install.sh
 ```
 
-Then restart Claude Code to load the new settings.
+Then restart Claude Code. If the Python deps fail to install you'll get a warning rather than an abort — the statusline still works on native data.
 
 ## How it works
 
-Claude Code runs `statusline-command.sh` and passes a JSON blob on stdin with the current session state (`cwd`, `model`, `context_window`, etc.). The shell script:
+Claude Code runs `statusline-command.sh` on every response and every 60 s, passing a JSON blob on stdin. The script:
 
-1. Parses session state with `jq`
-2. Builds the context window bar
-3. Calls `statusline-usage.py` for live plan usage data (cached 5 min)
-4. Assembles the output with ANSI colour codes
+1. Parses everything it needs in one `jq` call
+2. Resolves the model from the transcript tail
+3. Calls `statusline-usage.py` (cached) and overlays native `rate_limits` on top
+4. Builds the bars in pure shell (10 segments × 8 fractional steps ≈ 1.25% resolution)
+5. Measures the plain-text width against `COLUMNS` and emits one line if it fits, otherwise two
 
-### Fetching plan usage
+### Fetching plan usage (helper)
 
-`statusline-usage.py` authenticates with claude.ai by decrypting your session cookie from the Claude desktop app's Electron SQLite cookie database. On macOS it reads the AES encryption key from Keychain (`Claude Safe Storage`), derives a 16-byte key via PBKDF2-SHA1 (1003 iterations), and decrypts the `v10`-prefixed cookie value.
+On macOS the helper reads the Electron AES key from Keychain (`Claude Safe Storage`), derives a 16-byte key via PBKDF2-SHA1 (1003 iterations), decrypts the `v10`-prefixed cookie, then calls:
 
-It then calls two internal claude.ai API endpoints:
-- `/api/organizations/{org_id}/usage` — session/weekly utilisation and reset times
-- `/api/organizations/{org_id}/prepaid/credits` — prepaid credit balance
+- `/api/organizations/{org_id}/usage` — 5h/7d windows and the `limits[]` array (where the model-scoped cap lives, keyed by `kind == "weekly_scoped"`)
+- `/api/organizations/{org_id}/prepaid/credits` — prepaid balance
 
-Results are cached to `/tmp/claude_usage_cache.json` for 5 minutes. A `Stop` hook in Claude Code zeroes `_cached_at` after every response, forcing a re-fetch on the next render while preserving stale values as a fallback if the API call fails.
+Results cache to `/tmp/claude_usage_cache.json` for 5 minutes. A `Stop` hook zeroes `_cached_at` after every response so the next render re-fetches, keeping stale values as a fallback if the request fails. The cache also self-invalidates the moment any window's `resets_at` passes.
 
 ## Platform support
 
-| Platform | Status |
-|---|---|
-| macOS | ✅ Supported |
-| Linux | ❌ Not yet (cookie path and keychain differ from macOS) |
-| Windows | ❌ Not yet (DPAPI cookie decryption differs) |
+| Platform | Native 5h/7d, effort, PR, ctx | Cookie helper (`fable`, `bal`) |
+|---|---|---|
+| macOS | ✅ | ✅ |
+| Linux | ✅ | ❌ cookie path and keyring differ |
+| Windows | ✅ (untested) | ❌ DPAPI cookie decryption differs |
 
 ## Customisation
 
-Colour thresholds and the separator are set in `statusline-command.sh`. The bar is fixed at 10 segments. The colour scheme:
+Thresholds, colours and the separator are set at the top of `statusline-command.sh`. Bars are fixed at 10 segments.
 
-| Variable | Colour | Used for |
-|---|---|---|
-| `CYAN` | Cyan | Working directory |
-| `BLUE` | Soft blue | Git branch |
-| `PURPLE` | Purple | Model name |
-| `GREEN` | Green | Usage < 50% |
-| `AMBER` | Amber | Usage 50–79% |
-| `RED` | Red | Usage ≥ 80% |
-| `WHITE` | White | Credit balance |
+| Variable | Used for |
+|---|---|
+| `CYAN` | Working directory |
+| `BLUE` | Git branch |
+| `PURPLE` | Model name |
+| `GRAY` | Effort level, draft PRs |
+| `GREEN` / `AMBER` / `RED` | Usage < 50% / 50–79% / ≥ 80%, PR review state |
+| `WHITE` | Credit balance |

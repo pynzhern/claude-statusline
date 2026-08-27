@@ -1,10 +1,10 @@
 #!/bin/sh
 # claude-statusline installer
 # installs a rich statusline for Claude Code showing:
-#   cwd · git branch · model · context bar · 5h/7d plan usage · prepaid balance
+#   cwd · branch · PR · model · effort · ctx% · 5h/7d plan usage · model cap · balance
 #
-# supported: macOS, Linux
-# requires:  python3, pip, jq
+# supported: macOS (Linux gets native 5h/7d only — see README)
+# requires:  python3, jq
 
 set -e
 
@@ -29,17 +29,31 @@ command -v jq      >/dev/null 2>&1 || fail "jq not found — brew install jq / a
 ok "dependencies: python3, jq"
 
 # ── python dependencies ────────────────────────────────────────────────────────
+# must target the SAME interpreter statusline-command.sh will run the helper
+# with (framework /usr/local/bin/python3 when present, else bare python3) —
+# otherwise the probe passes here and the statusline silently gets no usage.
+USAGE_PY=/usr/local/bin/python3
+[ -x "$USAGE_PY" ] || USAGE_PY=python3
+ok "usage helper interpreter: $USAGE_PY"
+
 # ensure_pip <package> <import-probe>
-#   package      — name passed to `pip3 install`
+#   package      — name passed to pip
 #   import-probe — python expression that raises if the package is missing
+# homebrew python (PEP 668) refuses plain `pip install`; retry with
+# --break-system-packages before giving up. a failure here is a warning, not
+# an abort: the statusline still works on native 5h/7d data without the helper.
 ensure_pip() {
   package="$1"; probe="$2"
-  if python3 -c "$probe" 2>/dev/null; then
+  if "$USAGE_PY" -c "$probe" 2>/dev/null; then
     ok "$package already installed"
   else
     warn "installing $package..."
-    pip3 install "$package" --quiet || fail "pip3 install $package failed"
-    ok "$package installed"
+    if "$USAGE_PY" -m pip install --quiet "$package" 2>/dev/null \
+       || "$USAGE_PY" -m pip install --quiet --break-system-packages "$package" 2>/dev/null; then
+      ok "$package installed"
+    else
+      warn "$package install failed — model cap + balance segments will be unavailable"
+    fi
   fi
 }
 
@@ -50,7 +64,7 @@ ensure_pip curl_cffi    "from curl_cffi import requests"
 platform=$(uname -s)
 case "$platform" in
   Darwin) ok "platform: macOS" ;;
-  Linux)  ok "platform: Linux" ;;
+  Linux)  warn "platform: Linux — cookie helper unsupported, native 5h/7d only" ;;
   *)      fail "unsupported platform: $platform (Windows not yet supported)" ;;
 esac
 
@@ -58,8 +72,7 @@ esac
 mkdir -p "$CLAUDE_DIR"
 cp "$SCRIPT_DIR/statusline-command.sh" "$CLAUDE_DIR/statusline-command.sh"
 cp "$SCRIPT_DIR/statusline-usage.py"   "$CLAUDE_DIR/statusline-usage.py"
-cp "$SCRIPT_DIR/effort-hook.sh"        "$CLAUDE_DIR/effort-hook.sh"
-chmod +x "$CLAUDE_DIR/statusline-command.sh" "$CLAUDE_DIR/effort-hook.sh"
+chmod +x "$CLAUDE_DIR/statusline-command.sh"
 ok "scripts copied to $CLAUDE_DIR"
 
 # ── patch settings.json ────────────────────────────────────────────────────────
@@ -87,10 +100,15 @@ s['statusLine'] = {
 # add Stop hook: zero _cached_at so the next render fetches fresh data,
 # but keep the stale values so they can be served as a fallback if the
 # API call fails (better than showing nothing).
-# also add UserPromptSubmit hook to track session-only /effort max
 # (avoid backticks here — this heredoc is unquoted so shell would try
 # to run them as command substitution before python ever sees the text).
+# the old UserPromptSubmit effort hook is retired: Claude Code 2.1.x pipes
+# .effort.level natively, so remove it if a previous install added it.
 hooks = s.get('hooks', {})
+ups = [e for e in hooks.get('UserPromptSubmit', [])
+       if not any('effort-hook.sh' in h.get('command', '') for h in e.get('hooks', []))]
+if ups: hooks['UserPromptSubmit'] = ups
+else:   hooks.pop('UserPromptSubmit', None)
 
 def ensure_hook(event, cmd):
     entries = hooks.get(event, [])
@@ -102,11 +120,9 @@ def ensure_hook(event, cmd):
         entries.append({'hooks': [{'type': 'command', 'command': cmd}]})
     hooks[event] = entries
 
-cache_cmd  = """python3 -c "import json,os; f='/tmp/claude_usage_cache.json'; d=json.load(open(f)) if os.path.exists(f) else {}; d['_cached_at']=0; json.dump(d,open(f,'w'))" 2>/dev/null || true"""
-effort_cmd = 'sh $CLAUDE_DIR/effort-hook.sh'
+cache_cmd = """python3 -c "import json,os; f='/tmp/claude_usage_cache.json'; d=json.load(open(f)) if os.path.exists(f) else {}; d['_cached_at']=0; json.dump(d,open(f,'w'))" 2>/dev/null || true"""
 
-ensure_hook('Stop',              cache_cmd)
-ensure_hook('UserPromptSubmit',  effort_cmd)
+ensure_hook('Stop', cache_cmd)
 
 s['hooks'] = hooks
 
@@ -116,13 +132,13 @@ with open(path, 'w') as f:
 print('settings.json updated')
 PYEOF
 
-ok "settings.json patched (statusLine + Stop + UserPromptSubmit hooks)"
+ok "settings.json patched (statusLine + Stop hook)"
 
 # ── smoke test ─────────────────────────────────────────────────────────────────
 echo ""
 echo "  running a quick smoke test..."
 echo ""
-result=$(echo '{"cwd":"'"$HOME"'","model":{"display_name":"claude-sonnet-4-6"},"context_window":{"used_percentage":35}}' \
+result=$(echo '{"cwd":"'"$HOME"'","model":{"display_name":"Opus 5"},"context_window":{"used_percentage":35},"effort":{"level":"high"}}' \
   | bash "$CLAUDE_DIR/statusline-command.sh" 2>/dev/null || true)
 
 if [ -n "$result" ]; then
